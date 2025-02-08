@@ -1,0 +1,14 @@
+[build-system]
+build-backend = 'mesonpy'
+requires = ['meson-python']
+
+[project]
+name = 'pycoro'
+version = '0.0.1'
+description = 'Python coroutines without asyncio'
+readme = 'README.md'
+requires-python = '>=3.8'
+license = {file = 'LICENSE'}
+authors = [
+  {name = 'Rishin Goswami', email = 'rishin.goswami@gmail.com'},
+]
