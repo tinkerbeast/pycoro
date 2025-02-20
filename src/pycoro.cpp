@@ -40,9 +40,9 @@ struct CoroScheduler { // TODO: per thread instance? or guarantee only one threa
 
     bool stop_ = false; // TODO: atomic
     uint64_t max_coro_ = 0;
-    uint64_t current_coro_ = -1; // TODO: make into CoroContext*
+    CoroContext* current_coro_ = nullptr;
     ucontext_t loop_ctx_;
-    std::deque<uint64_t> q_; // TODO: threadsafe
+    std::deque<CoroContext*> q_; // TODO: threadsafe
     std::unordered_map<uint64_t, CoroContext> coros_; // TODO: splay tree based map would be better
 
     CoroScheduler() {
@@ -77,10 +77,9 @@ struct CoroScheduler { // TODO: per thread instance? or guarantee only one threa
                 exit(EXIT_SUCCESS);
                 continue;
             }
-            uint64_t coro_id = q_.front();
-            PRINTX("Loop1 %lu %lu\n", current_coro_, coro_id);
+            CoroContext& c = *(q_.front());
             q_.pop_front();
-            CoroContext& c = coros_.at(coro_id);
+            PRINTX("Loop1 %lu %lu\n", current_coro_->id, c.id);
             // Initialise if first time coro.
             if (c.is_new) {
                 c.is_new = false;
@@ -95,17 +94,17 @@ struct CoroScheduler { // TODO: per thread instance? or guarantee only one threa
                 makecontext(&c.ctx, event_loop_entry_, 0);
             }
             // Context restore the Python thread state.
-            PRINTX("Loop2 %lu %lu\n", current_coro_, coro_id);
+            PRINTX("Loop2 %lu %lu\n", current_coro_->id, c.id);
             PRINTX("Loop context switching_to=%p\n", c.tsp);
             PyThreadState_Swap(c.tsp);
             // Context restore the stack state.
-            current_coro_ = coro_id;
-            PRINTX("Loop3 %lu %lu\n", current_coro_, coro_id);
+            current_coro_ = &c;
+            PRINTX("Loop3 %lu %lu\n", current_coro_->id, c.id);
             if (swapcontext(&loop_ctx_, &c.ctx) == -1) {
                 // TODO: error logging
                 std::abort();
             }
-            PRINTX("Loop4 %lu %lu\n", current_coro_, coro_id);
+            PRINTX("Loop4 %lu %lu\n", current_coro_->id, c.id);
             PRINTX("Loop loop switching_to=%p\n", tstate_init);
             PyThreadState* tfrom = PyThreadState_Swap(tstate_init);
             PRINTX("Loop loop switching_from=%p\n", tfrom);
@@ -113,11 +112,11 @@ struct CoroScheduler { // TODO: per thread instance? or guarantee only one threa
     }
 
     void yield() noexcept {
-        PRINTX("Yielding %lu\n", current_coro_);
+        PRINTX("Yielding %lu\n", current_coro_->id);
         // Change scheduler state to make current coro inactive.
-        CoroContext& c = coros_.at(current_coro_);
+        CoroContext& c = *current_coro_;
         q_.push_back(current_coro_);
-        current_coro_ = -1;
+        current_coro_ = nullptr;
         // Switch thread context.
         if (swapcontext(&c.ctx, &loop_ctx_) == -1) {
             // TODO: error logging
@@ -135,8 +134,9 @@ struct CoroScheduler { // TODO: per thread instance? or guarantee only one threa
             .kwargs=func_kwargs
         };
 
-        coros_.emplace(max_coro_, std::move(c));
-        q_.push_back(max_coro_);
+        coros_.emplace(max_coro_, std::move(c)); // TODO: Create without moving
+        CoroContext& created_coro = coros_.at(max_coro_);
+        q_.push_back(&created_coro);
         ++max_coro_;
     }
 
@@ -151,8 +151,8 @@ CoroScheduler& CoroScheduler::get_event_loop() {
 
 void event_loop_entry_() {
     CoroScheduler& e = CoroScheduler::get_event_loop();
-    CoroContext& c = e.coros_.at(e.current_coro_);
-    PRINTX("Entering %lu\n", e.current_coro_);
+    CoroContext& c = *e.current_coro_;
+    PRINTX("Entering %lu\n", e.current_coro_->id);
     try {
         // TODO: handle multiple args
         // TODO: deal with return
@@ -161,9 +161,10 @@ void event_loop_entry_() {
         // TODO: do something with the exception ptr
         // NOTE: **THIS MECHANISM CAN BE USE TO UNWIND THE THREAD AND KILL A CORO**
     }
-    PRINTX("Exiting %p %lu\n", ret, e.current_coro_);
-    e.coros_.erase(e.current_coro_);
-    e.current_coro_ = -1;
+    PRINTX("Exiting %p %lu\n", ret, e.current_coro_->id);
+    e.coros_.erase(e.current_coro_->id);
+    e.current_coro_ = nullptr;
+    // TODO: VERY VERY IMPORTANT - Cleanup the stack and PyThreadState
 }
 
 static PyObject* foo(PyObject* self) {
@@ -200,7 +201,7 @@ static PyObject* _run_forever(PyObject* self) {
 }
 
 static PyObject* _current_coro(PyObject* self) {
-    return PyLong_FromUnsignedLong(CoroScheduler::get_event_loop().current_coro_);
+    return PyLong_FromUnsignedLong(CoroScheduler::get_event_loop().current_coro_->id);
 }
 
 static PyMethodDef methods[] = {
